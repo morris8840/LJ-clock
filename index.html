@@ -32,8 +32,7 @@
   <img id="preview" alt="" hidden>
   <div id="status">載入中…</div>
   <button id="retry" class="second" hidden>重新定位</button>
-  <button id="browser" class="second" hidden>改用手機瀏覽器打卡</button>
-  <p style="margin-top:32px;font-size:12px;color:#aaa">打卡頁版本 5</p>
+  <p style="margin-top:32px;font-size:12px;color:#aaa">打卡頁版本 6</p>
 </main>
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script>
@@ -49,9 +48,7 @@
 
   function show(text, cls) { $('status').className = cls || ''; $('status').textContent = text; }
 
-  // 先定位、再拍照：定位成功才開放拍照按鈕，員工不用拍完照才發現定位失敗
-  const LOCATION_HELP = '\n\n請檢查手機設定：\niPhone：設定 → 隱私權與安全性 → 定位服務要打開；設定 → LINE → 位置 → 選「使用 App 期間」並打開「精確位置」\nAndroid：設定 → 應用程式 → LINE → 權限 → 位置 → 允許';
-  const ERROR_NAMES = { 1: '沒有權限', 2: '手機無法定位', 3: '定位逾時' };
+  // 先確認位置、再拍照（iPhone 的 LINE 有時不給網頁 GPS，這時改用公司 Wi‑Fi 確認）
   let lastPos = null, posError = null, watchId = null;
   function keepBest(p) { if (!lastPos || p.coords.accuracy <= lastPos.coords.accuracy || Date.now() - lastPos.timestamp > 30000) lastPos = p; posError = null; }
   function keepError(e) { posError = e; }
@@ -64,39 +61,39 @@
     navigator.geolocation.getCurrentPosition(keepBest, keepError, { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 });
   }
 
-  /** 等定位：準度夠就馬上用；5 秒後有定位就直接用；最多等 10 秒，不會無限卡住 */
+  /** 等定位：準度夠就馬上用；最多等 5 秒，抓不到就回傳 null，改用公司 Wi‑Fi 確認 */
   function getPosition() {
-    return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) return reject(new Error('這支手機不支援定位' + LOCATION_HELP));
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) return resolve(null);
       const started = Date.now();
       (function wait() {
         const sec = Math.floor((Date.now() - started) / 1000);
         if (lastPos && lastPos.coords.accuracy <= 100) return resolve(lastPos);
-        if (lastPos && sec >= 5) return resolve(lastPos);
-        if (posError && posError.code === 1) return reject(new Error('LINE 沒有取得位置的權限。' + LOCATION_HELP));
-        if (sec >= 10) {
-          const why = posError ? '（' + (ERROR_NAMES[posError.code] || '代碼 ' + posError.code) + '）' : '（手機沒有回應）';
-          return reject(new Error('抓不到手機定位' + why + '。' + LOCATION_HELP));
-        }
-        show('正在取得手機定位…（' + sec + ' 秒）');
+        if (sec >= 5 || (posError && posError.code === 1)) return resolve(lastPos);
+        show('正在確認您在公司…（' + sec + ' 秒）');
         setTimeout(wait, 300);
       })();
     });
   }
 
-  /** 開啟頁面後先定位；成功才顯示拍照按鈕，失敗就提供「改用 Safari／瀏覽器打卡」 */
+  // 手機目前的網路位址：連著公司 Wi‑Fi 時會和公司的固定 IP 相同，GPS 抓不到時用它確認在公司
+  const ipReady = fetch('https://api.ipify.org?format=json').then((r) => r.json()).then((d) => d.ip)
+    .catch(() => fetch('https://www.cloudflare.com/cdn-cgi/trace').then((r) => r.text())
+      .then((t) => (t.match(/^ip=(.+)$/m) || [])[1] || ''))
+    .catch(() => '');
+
+  /** 開啟頁面後先確認位置（GPS 優先，抓不到就用公司 Wi‑Fi），然後開放拍照按鈕 */
   async function locate() {
-    $('go').disabled = true; $('retry').hidden = true; $('browser').hidden = true;
+    $('go').disabled = true; $('retry').hidden = true;
     requestLocation();
-    try {
-      const pos = await getPosition();
+    const pos = await getPosition();
+    if (pos) {
       show('定位完成 ✓（誤差約 ' + Math.round(pos.coords.accuracy) + ' 公尺）\n請按下方按鈕，拍一張自己的照片完成打卡。', 'ok');
-      $('go').disabled = false;
-    } catch (e) {
-      show(e.message, 'err');
+    } else {
+      show('手機定位抓不到，將改用「公司 Wi‑Fi」確認。\n請確認手機已連上公司 Wi‑Fi，再按下方按鈕拍照打卡。');
       $('retry').hidden = false;
-      if (liff.isInClient()) $('browser').hidden = false;
     }
+    $('go').disabled = false;
   }
 
   /** 把照片縮小到最長邊 480 像素，減少上傳時間（看得出是誰就夠了） */
@@ -123,7 +120,8 @@
       show('正在處理照片…');
       const photo = await shrinkPhoto(file);
       $('preview').src = photo; $('preview').hidden = false;
-      const pos = await getPosition();
+      const pos = lastPos || await getPosition();
+      const ip = await ipReady;
       show('正在送出打卡，大約 5 秒，請不要關閉…');
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), 40000);
@@ -131,8 +129,9 @@
         method: 'POST', signal: abort.signal,
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
-          action: 'punch', kind, idToken: liff.getIDToken(), photo,
-          lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy),
+          action: 'punch', kind, idToken: liff.getIDToken(), photo, ip,
+          lat: pos ? pos.coords.latitude : null, lng: pos ? pos.coords.longitude : null,
+          accuracy: pos ? Math.round(pos.coords.accuracy) : null,
         }),
       });
       const result = await res.json();
@@ -149,8 +148,6 @@
   $('go').addEventListener('click', () => $('camera').click());
   $('camera').addEventListener('change', (e) => { if (e.target.files[0]) submit(e.target.files[0]); e.target.value = ''; });
   $('retry').addEventListener('click', locate);
-  // LINE 內建瀏覽器抓不到定位時，改用手機的 Safari／Chrome 開同一頁（一樣用 LINE 確認身分）
-  $('browser').addEventListener('click', () => liff.openWindow({ url: location.href, external: true }));
 
   liff.init({ liffId: LIFF_ID }).then(() => {
     if (!liff.isLoggedIn()) return liff.login({ redirectUri: location.href });
