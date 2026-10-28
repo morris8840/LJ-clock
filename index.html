@@ -29,6 +29,7 @@
   <input id="camera" type="file" accept="image/*" capture="user">
   <img id="preview" alt="" hidden>
   <div id="status">載入中…</div>
+  <p style="margin-top:32px;font-size:12px;color:#aaa">打卡頁版本 4</p>
 </main>
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script>
@@ -55,7 +56,7 @@
     navigator.geolocation.getCurrentPosition(keepBest, () => {}, { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 });
   }
 
-  /** 等定位：準度夠就馬上用；最多等 15 秒，期間顯示秒數，不會無限卡住 */
+  /** 等定位：準度夠就馬上用；5 秒後有定位就直接送；最多等 10 秒，不會無限卡住 */
   function getPosition() {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) return reject(new Error('這支手機不支援定位' + LOCATION_HELP));
@@ -63,9 +64,9 @@
       (function wait() {
         const sec = Math.floor((Date.now() - started) / 1000);
         if (lastPos && lastPos.coords.accuracy <= 100) return resolve(lastPos);
+        if (lastPos && sec >= 5) return resolve(lastPos);
         if (posError && posError.code === 1) return reject(new Error('LINE 沒有取得位置的權限。' + LOCATION_HELP));
-        if (sec >= 15) {
-          if (lastPos) return resolve(lastPos);
+        if (sec >= 10) {
           return reject(new Error('抓不到手機定位。' + LOCATION_HELP + '\n\n設定好後，關掉這個畫面再按一次打卡。'));
         }
         show('正在取得手機定位…（' + sec + ' 秒）');
