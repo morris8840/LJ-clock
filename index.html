@@ -44,26 +44,38 @@
 
   function show(text, cls) { $('status').className = cls || ''; $('status').textContent = text; }
 
+  // 一打開頁面就開始抓 GPS，員工拍照的同時定位已經在進行，不用拍完再等
+  let lastPos = null, posError = null;
+  if (navigator.geolocation) {
+    navigator.geolocation.watchPosition((p) => { lastPos = p; posError = null; }, (e) => { posError = e; },
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+  }
+
   function getPosition() {
     return new Promise((resolve, reject) => {
       if (!navigator.geolocation) return reject(new Error('這支手機不支援定位'));
-      navigator.geolocation.getCurrentPosition(resolve, (e) => reject(new Error(
-        e.code === 1 ? '請允許 LINE 使用位置資訊（手機設定 → LINE → 位置）' : '抓不到定位，請到戶外或靠窗再試一次')),
-        { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+      const started = Date.now();
+      (function wait() {
+        if (lastPos) return resolve(lastPos);
+        if (posError && posError.code === 1) return reject(new Error('請允許 LINE 使用位置資訊（手機設定 → LINE → 位置）'));
+        if (Date.now() - started > 20000) return reject(new Error('抓不到定位，請到戶外或靠窗再試一次'));
+        setTimeout(wait, 200);
+      })();
     });
   }
 
-  /** 把照片縮小到最長邊 800 像素，減少上傳時間 */
+  /** 把照片縮小到最長邊 480 像素，減少上傳時間（看得出是誰就夠了） */
   function shrinkPhoto(file) {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
-        const scale = Math.min(1, 800 / Math.max(img.width, img.height));
+        const scale = Math.min(1, 480 / Math.max(img.width, img.height));
         const canvas = document.createElement('canvas');
         canvas.width = Math.round(img.width * scale);
         canvas.height = Math.round(img.height * scale);
         canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', 0.75));
+        URL.revokeObjectURL(img.src);
+        resolve(canvas.toDataURL('image/jpeg', 0.6));
       };
       img.onerror = () => reject(new Error('照片讀取失敗，請再拍一次'));
       img.src = URL.createObjectURL(file);
@@ -78,7 +90,7 @@
       $('preview').src = photo; $('preview').hidden = false;
       show('正在取得手機定位…');
       const pos = await getPosition();
-      show('正在送出打卡…');
+      show('正在送出打卡，大約 5 秒，請不要關閉…');
       const res = await fetch(SYSTEM_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
