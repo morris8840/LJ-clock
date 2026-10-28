@@ -45,21 +45,31 @@
   function show(text, cls) { $('status').className = cls || ''; $('status').textContent = text; }
 
   // 一打開頁面就開始抓 GPS，員工拍照的同時定位已經在進行，不用拍完再等
+  const LOCATION_HELP = '\n\n請檢查手機設定：\niPhone：設定 → LINE → 位置 → 選「使用 App 期間」，並打開「精確位置」\nAndroid：設定 → 應用程式 → LINE → 權限 → 位置 → 允許';
   let lastPos = null, posError = null;
+  function keepBest(p) { if (!lastPos || p.coords.accuracy <= lastPos.coords.accuracy || Date.now() - lastPos.timestamp > 30000) lastPos = p; posError = null; }
   if (navigator.geolocation) {
-    navigator.geolocation.watchPosition((p) => { lastPos = p; posError = null; }, (e) => { posError = e; },
+    navigator.geolocation.watchPosition(keepBest, (e) => { posError = e; },
       { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+    // 另外先抓一次粗略定位當備用，避免高精準定位遲遲不回應
+    navigator.geolocation.getCurrentPosition(keepBest, () => {}, { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 });
   }
 
+  /** 等定位：準度夠就馬上用；最多等 15 秒，期間顯示秒數，不會無限卡住 */
   function getPosition() {
     return new Promise((resolve, reject) => {
-      if (!navigator.geolocation) return reject(new Error('這支手機不支援定位'));
+      if (!navigator.geolocation) return reject(new Error('這支手機不支援定位' + LOCATION_HELP));
       const started = Date.now();
       (function wait() {
-        if (lastPos) return resolve(lastPos);
-        if (posError && posError.code === 1) return reject(new Error('請允許 LINE 使用位置資訊（手機設定 → LINE → 位置）'));
-        if (Date.now() - started > 20000) return reject(new Error('抓不到定位，請到戶外或靠窗再試一次'));
-        setTimeout(wait, 200);
+        const sec = Math.floor((Date.now() - started) / 1000);
+        if (lastPos && lastPos.coords.accuracy <= 100) return resolve(lastPos);
+        if (posError && posError.code === 1) return reject(new Error('LINE 沒有取得位置的權限。' + LOCATION_HELP));
+        if (sec >= 15) {
+          if (lastPos) return resolve(lastPos);
+          return reject(new Error('抓不到手機定位。' + LOCATION_HELP + '\n\n設定好後，關掉這個畫面再按一次打卡。'));
+        }
+        show('正在取得手機定位…（' + sec + ' 秒）');
+        setTimeout(wait, 300);
       })();
     });
   }
@@ -91,8 +101,10 @@
       show('正在取得手機定位…');
       const pos = await getPosition();
       show('正在送出打卡，大約 5 秒，請不要關閉…');
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 40000);
       const res = await fetch(SYSTEM_URL, {
-        method: 'POST',
+        method: 'POST', signal: abort.signal,
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
           action: 'punch', kind, idToken: liff.getIDToken(), photo,
@@ -100,10 +112,11 @@
         }),
       });
       const result = await res.json();
+      clearTimeout(timer);
       show(result.message, result.ok ? 'ok' : 'err');
       if (result.ok) setTimeout(() => liff.isInClient() && liff.closeWindow(), 3000);
     } catch (e) {
-      show(e.message || '打卡失敗，請再試一次', 'err');
+      show(e.name === 'AbortError' ? '網路太慢，打卡沒有送出，請再按一次。' : (e.message || '打卡失敗，請再試一次'), 'err');
     } finally {
       $('go').disabled = false;
     }
