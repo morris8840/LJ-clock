@@ -29,10 +29,11 @@
   <div class="clock" id="clock"></div>
   <button id="go" disabled>拍照並打卡</button>
   <input id="camera" type="file" accept="image/*" capture="user">
+  <input id="dutyCam" type="file" accept="image/*" capture="environment">
   <img id="preview" alt="" hidden>
   <div id="status">載入中…</div>
   <button id="retry" class="second" hidden>重新定位</button>
-  <p style="margin-top:32px;font-size:12px;color:#aaa">打卡頁版本 8</p>
+  <p style="margin-top:32px;font-size:12px;color:#aaa">打卡頁版本 9</p>
 </main>
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script>
@@ -159,12 +160,125 @@
     }
   }
 
-  $('go').addEventListener('click', () => (usePhoto ? $('camera').click() : submit(null)));
+  // ── 值日拍照模式（網址有 ?duty=工作編號）：照片自動印上「姓名 民國日期 時間 地點」──
+  const dutyId = new URLSearchParams(location.search).get('duty');
+  let duty = null;
+
+  async function callSystem(payload) {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 60000);
+    try {
+      const res = await fetch(SYSTEM_URL, {
+        method: 'POST', signal: abort.signal,
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(Object.assign({ idToken: liff.getIDToken(), id: dutyId }, payload)),
+      });
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function showDutyNext() {
+    const n = duty.got;
+    if (n >= duty.labels.length) {
+      $('go').hidden = true;
+      return;
+    }
+    $('kind').textContent = duty.labels[n];
+    $('go').textContent = '拍照（第 ' + (n + 1) + '/' + duty.labels.length + ' 張）';
+    $('go').hidden = false;
+    $('go').disabled = false;
+  }
+
+  /** 縮到最長邊 1600 像素，左下角印上姓名、時間、地點（白字黑邊，任何背景都看得清楚） */
+  function stampPhoto(file, text) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        let size = Math.round(canvas.width * 0.055);
+        ctx.font = 'bold ' + size + 'px "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+        while (ctx.measureText(text).width > canvas.width * 0.92 && size > 12) {
+          size -= 2;
+          ctx.font = 'bold ' + size + 'px "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif';
+        }
+        const x = Math.round(canvas.width * 0.04);
+        const y = Math.round(canvas.height - canvas.width * 0.05);
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = Math.max(3, size / 6);
+        ctx.strokeStyle = '#000';
+        ctx.strokeText(text, x, y);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(text, x, y);
+        URL.revokeObjectURL(img.src);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.onerror = () => reject(new Error('照片讀取失敗，請再拍一次'));
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
+  function stampText(label) {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return duty.name + '  ' + (d.getFullYear() - 1911) + '/' + p(d.getMonth() + 1) + '/' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + '  ' + label;
+  }
+
+  async function submitDutyPhoto(file) {
+    $('go').disabled = true;
+    try {
+      show('正在印上姓名、時間、地點…');
+      const photo = await stampPhoto(file, stampText(duty.labels[duty.got]));
+      $('preview').src = photo; $('preview').hidden = false;
+      show('正在上傳照片，請不要關閉…');
+      const result = await callSystem({ action: 'dutyPhoto', photo });
+      show(result.message, result.ok ? 'ok' : 'err');
+      if (result.ok) {
+        duty.got = result.got;
+        if (result.done) setTimeout(() => liff.isInClient() && liff.closeWindow(), 4000);
+      }
+    } catch (e) {
+      show(e.name === 'AbortError' ? '網路太慢，照片沒有送出，請再拍一次。' : (e.message || '上傳失敗，請再試一次'), 'err');
+    } finally {
+      showDutyNext();
+    }
+  }
+
+  async function startDuty() {
+    document.querySelector('h1').textContent = '立隼企業 值日拍照';
+    $('clock').hidden = true;
+    $('go').disabled = true;
+    show('載入工作中…');
+    try {
+      const info = await callSystem({ action: 'dutyPhotoInfo' });
+      if (!info.ok) return show(info.message, 'err');
+      duty = info;
+      if (duty.got >= duty.labels.length) {
+        $('kind').textContent = duty.title;
+        $('go').hidden = true;
+        return show('「' + duty.title + '」的照片已經收齊了 ✓', 'ok');
+      }
+      show(duty.title + '：共要拍 ' + duty.labels.length + ' 張\n照片會自動印上「' + duty.name + '、時間、地點」。');
+      showDutyNext();
+    } catch (e) {
+      show('載入失敗，請關掉後從卡片重新按「拍照」。', 'err');
+    }
+  }
+
+  $('go').addEventListener('click', () => (dutyId ? $('dutyCam').click() : usePhoto ? $('camera').click() : submit(null)));
   $('camera').addEventListener('change', (e) => { if (e.target.files[0]) submit(e.target.files[0]); e.target.value = ''; });
+  $('dutyCam').addEventListener('change', (e) => { if (e.target.files[0]) submitDutyPhoto(e.target.files[0]); e.target.value = ''; });
   $('retry').addEventListener('click', locate);
 
   liff.init({ liffId: LIFF_ID }).then(() => {
     if (!liff.isLoggedIn()) return liff.login({ redirectUri: location.href });
+    if (dutyId) return startDuty();
     locate();
   }).catch(() => show('打卡頁啟動失敗，請從 LINE 官方帳號的按鈕開啟。', 'err'));
 </script>
