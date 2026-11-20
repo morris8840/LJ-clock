@@ -20,6 +20,27 @@
   .ok { color: var(--ok); font-weight: bold; } .err { color: var(--brand); font-weight: bold; }
   img { max-width: 60%; border-radius: 8px; margin-top: 12px; }
   input[type=file] { display: none; }
+  /* 請假月曆 */
+  main.wide { max-width: 640px; padding: 16px 8px; }
+  .calnav { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+  .calnav b { font-size: 20px; }
+  .calnav button { width: 56px; padding: 8px 0; font-size: 20px; background: #fff; color: var(--brand); border: 1px solid #ddd; }
+  .grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; background: #e4e4e4; border: 1px solid #e4e4e4; }
+  .grid .wd { background: #fafafa; font-size: 13px; color: var(--muted); padding: 4px 0; }
+  .grid .cell { background: #fff; min-height: 76px; padding: 3px 2px; text-align: left; font-size: 12px; overflow: hidden; cursor: default; }
+  .cell .n { font-size: 15px; display: block; text-align: center; margin-bottom: 2px; }
+  .cell.off { background: #f3f3f3; color: #aaa; }
+  .cell.hol { background: #fdecec; }
+  .cell.hol .n, .cell .hn { color: var(--brand); }
+  .cell .hn { font-size: 10px; display: block; text-align: center; line-height: 1.2; }
+  .cell .p { display: block; font-size: 11px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #1f5fa8; }
+  .cell .p.pend { color: #999; }
+  .cell.pick { cursor: pointer; }
+  .cell.pick .n { font-weight: bold; color: #222; }
+  .cell.today .n { background: #1f5fa8; color: #fff; border-radius: 50%; width: 26px; height: 26px; line-height: 26px; margin: 0 auto 2px; }
+  .cell.sel { outline: 3px solid var(--brand); outline-offset: -3px; }
+  #calDetail { margin-top: 12px; font-size: 16px; line-height: 1.6; text-align: left; white-space: pre-line; min-height: 24px; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 8px; text-align: left; }
 </style>
 </head>
 <body>
@@ -33,7 +54,14 @@
   <img id="preview" alt="" hidden>
   <div id="status">載入中…</div>
   <button id="retry" class="second" hidden>重新定位</button>
-  <p style="margin-top:32px;font-size:12px;color:#aaa">打卡頁版本 9</p>
+  <section id="cal" hidden>
+    <div class="calnav"><button id="prevM">‹</button><b id="calTitle"></b><button id="nextM">›</button></div>
+    <div class="grid" id="grid"></div>
+    <div class="legend">紅色＝國定假日／公司放假　藍字＝已核准請假　灰字＝待核准</div>
+    <div id="calDetail"></div>
+    <button id="pickBtn" hidden>確定</button>
+  </section>
+  <p style="margin-top:32px;font-size:12px;color:#aaa">打卡頁版本 10</p>
 </main>
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script>
@@ -276,9 +304,118 @@
   $('dutyCam').addEventListener('change', (e) => { if (e.target.files[0]) submitDutyPhoto(e.target.files[0]); e.target.value = ''; });
   $('retry').addEventListener('click', locate);
 
+  // ── 請假月曆（網址有 ?mode=leave 選請假日期；?mode=calendar 只看大家的請假）──
+  const calMode = new URLSearchParams(location.search).get('mode');
+  let cal = null, calMonth = '', selDate = '';
+  const WD = '日一二三四五六';
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const ymd = (y, m, d) => y + '-' + pad2(m) + '-' + pad2(d);
+  const weekday = (date) => new Date(+date.slice(0, 4), +date.slice(5, 7) - 1, +date.slice(8, 10)).getDay();
+  const label = (date) => (+date.slice(5, 7)) + '/' + (+date.slice(8, 10)) + '(' + WD[weekday(date)] + ')';
+  const shiftMonth = (ym, k) => { const d = new Date(+ym.slice(0, 4), +ym.slice(5, 7) - 1 + k, 1); return d.getFullYear() + '-' + pad2(d.getMonth() + 1); };
+
+  function holidayOf(date) { return cal.holidays.find((h) => h.date === date); }
+  function leavesOf(date) { return cal.leaves.filter((l) => l.date === date); }
+  function canPick(date) {
+    return cal.picking && date >= cal.first && date <= cal.max && weekday(date) >= 1 && weekday(date) <= 5 && !holidayOf(date);
+  }
+  function addSpan(parent, cls, text) {
+    const s = document.createElement('span');
+    s.className = cls;
+    s.textContent = text;
+    parent.appendChild(s);
+  }
+
+  function renderCal() {
+    const y = +calMonth.slice(0, 4), m = +calMonth.slice(5, 7);
+    $('calTitle').textContent = y + ' 年 ' + m + ' 月';
+    $('prevM').disabled = calMonth <= cal.today.slice(0, 7);
+    $('nextM').disabled = calMonth >= cal.max.slice(0, 7);
+    const grid = $('grid');
+    grid.innerHTML = '';
+    for (const w of WD) addSpan(grid, 'wd', w);
+    const firstWd = new Date(y, m - 1, 1).getDay();
+    const days = new Date(y, m, 0).getDate();
+    for (let i = 0; i < firstWd; i++) addSpan(grid, 'cell off', '');
+    for (let d = 1; d <= days; d++) {
+      const date = ymd(y, m, d);
+      const wd = weekday(date);
+      const hol = holidayOf(date);
+      const cell = document.createElement('div');
+      cell.className = 'cell' + (wd === 0 || wd === 6 ? ' off' : '') + (hol ? ' hol' : '') + (canPick(date) ? ' pick' : '') +
+        (date === cal.today ? ' today' : '') + (date === selDate ? ' sel' : '');
+      addSpan(cell, 'n', String(d));
+      if (hol) addSpan(cell, 'hn', hol.name);
+      const ls = leavesOf(date);
+      ls.slice(0, 3).forEach((l) => addSpan(cell, 'p' + (l.pending ? ' pend' : ''),
+        l.name + (l.part === '全天' ? '' : ' ' + l.part.replace('上午', '上').replace('下午', '下'))));
+      if (ls.length > 3) addSpan(cell, 'p', '+' + (ls.length - 3) + ' 人');
+      cell.addEventListener('click', () => clickDay(date));
+      grid.appendChild(cell);
+    }
+  }
+
+  function clickDay(date) {
+    const hol = holidayOf(date);
+    const ls = leavesOf(date);
+    let text = label(date) + (hol ? '　' + hol.name : '') + '\n' +
+      (ls.length ? '請假：' + ls.map((l) => l.name + ' ' + l.part + (l.pending ? '（待核准）' : '')).join('、') : '這天沒有人請假');
+    if (cal.picking) {
+      if (canPick(date)) {
+        selDate = date;
+        $('pickBtn').textContent = '從 ' + label(date) + ' 開始請' + cal.type;
+        $('pickBtn').hidden = false;
+      } else {
+        selDate = '';
+        $('pickBtn').hidden = true;
+        text += '\n（這天不能選：' + (date < cal.first ? '已經過了' : date > cal.max ? '超過可請假範圍' : '不是上班日') + '）';
+      }
+      renderCal();
+    }
+    $('calDetail').textContent = text;
+  }
+
+  async function pickDate() {
+    if (!selDate) return;
+    $('pickBtn').disabled = true;
+    show('正在送出…');
+    try {
+      const r = await callSystem({ action: 'leavePick', date: selDate });
+      show(r.message, r.ok ? 'ok' : 'err');
+      if (r.ok) setTimeout(() => liff.isInClient() && liff.closeWindow(), 1500);
+    } catch (e) {
+      show('網路太慢，請再按一次。', 'err');
+    } finally {
+      $('pickBtn').disabled = false;
+    }
+  }
+
+  async function startCalendar() {
+    document.querySelector('main').classList.add('wide');
+    document.querySelector('h1').textContent = '立隼企業 請假月曆';
+    ['kind', 'clock', 'go'].forEach((id) => { $(id).hidden = true; });
+    $('cal').hidden = false;
+    show('載入月曆中…');
+    try {
+      cal = await callSystem({ action: 'leaveCalendar', mode: calMode });
+      if (!cal.ok) return show(cal.message, 'err');
+      calMonth = cal.today.slice(0, 7);
+      renderCal();
+      if (cal.picking) show('請點選【' + cal.type + '】的開始日期（最遠到 ' + cal.max.replace(/-/g, '/') + '）');
+      else if (calMode === 'leave') show('請假流程已經過期，請回到聊天室重新按「請假」。這裡仍可查看大家的請假。', 'err');
+      else show('點日期可以看當天誰請假。');
+    } catch (e) {
+      show('月曆載入失敗，請關掉後重新開啟。', 'err');
+    }
+  }
+  $('prevM').addEventListener('click', () => { calMonth = shiftMonth(calMonth, -1); renderCal(); });
+  $('nextM').addEventListener('click', () => { calMonth = shiftMonth(calMonth, 1); renderCal(); });
+  $('pickBtn').addEventListener('click', pickDate);
+
   liff.init({ liffId: LIFF_ID }).then(() => {
     if (!liff.isLoggedIn()) return liff.login({ redirectUri: location.href });
     if (dutyId) return startDuty();
+    if (calMode === 'leave' || calMode === 'calendar') return startCalendar();
     locate();
   }).catch(() => show('打卡頁啟動失敗，請從 LINE 官方帳號的按鈕開啟。', 'err'));
 </script>
